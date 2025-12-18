@@ -25,8 +25,8 @@
 
 1.  Clone the repository:
     ```bash
-    git clone [https://github.com/maionaisu/SRGI_Tidal_Converter.git](https://github.com/maionaisu/SRGI_Tidal_Converter.git)
-    cd SRGI_Tidal_Converter
+    git clone [https://github.com/maionaisu/SRGI_Converter.git](https://github.com/maionaisu/SRGI_Converter.git)
+    cd SRGI_Converter
     ```
 
 2.  Install dependencies:
@@ -39,20 +39,12 @@
 ## 💻 Usage
 
 1.  Place your raw SRGI text file (e.g., `data_pasut.txt`) in the project folder.
-2.  Import and run the architect:
+2.  Replace the target file name the same as your raw SRGI text file:
 
 ```python
-from srgi_converter import HydroTideArchitect
+# --- MAIN EXECUTION ---
+if __name__ == "__main__":
+    # GANTI NAMA FILE ANDA DI SINI
+    target_file = 'wg2pasut1-28jan.txt'
+```
 
-# Initialize with your file path
-architect = HydroTideArchitect(file_path='data_pasut.txt')
-
-# 1. Process Data (Clean & Shift Timezone)
-df = architect.process_data()
-
-# 2. Analyze (FFT & Tide Type)
-architect.analyze_tide_type()
-
-# 3. Generate Outputs
-architect.export_excel_pro() # Creates Excel Report
-architect.export_html_pro()  # Creates Interactive Dashboard
