@@ -1,18 +1,19 @@
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from scipy.signal import periodogram
 import io
 import os
 import re
+import utide  # Library standar Oseanografi untuk Analisis Harmonik
 
 class HydroTideArchitect:
     """
+    HydroTide Architect - Professional Edition
     1. Auto-Detect Location (Lat/Lon) dari Header.
     2. Auto-Convert Timezone (WIB/WITA/WIT).
-    3. Analisis Pasut (FFT) -> HASIL DITAMPILKAN JELAS DI GRAFIK.
+    3. Analisis Pasut (Harmonic Analysis via UTide) -> AKURASI TINGGI.
     4. Fieldwork Planner (Spring Tide).
-    5. Visualisasi Transversal (Filled Area).
+    5. Visualisasi Transversal (Filled Area) dengan Smart Ticks.
     """
     
     def __init__(self, file_path=None, raw_data_string=None):
@@ -23,7 +24,9 @@ class HydroTideArchitect:
             'tz_name': 'UTC', 
             'tz_offset': 0
         }
-        self.tide_type = "Unknown" # Default value
+        self.tide_type = "Unknown" 
+        self.formzahl = 0.0 
+        self.constituents = {} # Menyimpan hasil harmonik (A & g)
         self.raw_content = ""
         
         if file_path and os.path.exists(file_path):
@@ -37,81 +40,63 @@ class HydroTideArchitect:
             raise ValueError("Input data tidak valid.")
 
     def _detect_timezone_by_coords(self, lines):
-        """
-        Logika Cerdas: Mencari 'Lon:' di header dan menentukan Zona Waktu.
-        """
+        """Deteksi Zona Waktu berdasarkan Longitude di header."""
         self.metadata['lon'] = None
         self.metadata['lat'] = None
         
-        for line in lines[:15]: # Cek 15 baris pertama
-            # Regex menangkap angka desimal (termasuk negatif untuk Lat)
+        for line in lines[:20]: 
             match_lon = re.search(r'Lon:\s*([\d\.]+)', line)
             match_lat = re.search(r'Lat:\s*([-\d\.]+)', line)
             
-            if match_lon:
-                self.metadata['lon'] = float(match_lon.group(1))
-            if match_lat:
-                self.metadata['lat'] = float(match_lat.group(1))
+            if match_lon: self.metadata['lon'] = float(match_lon.group(1))
+            if match_lat: self.metadata['lat'] = float(match_lat.group(1))
         
-        # Logika Penentuan Zona Waktu Indonesia
         lon = self.metadata['lon']
         if lon is not None:
-            if lon < 114.8: # Barat Selat Bali (Jawa, Sumatera, dkk)
-                self.metadata['tz_name'] = 'WIB'
-                self.metadata['tz_offset'] = 7
-            elif 114.8 <= lon < 129.0: # Bali, Nusa Tenggara, Sulawesi
-                self.metadata['tz_name'] = 'WITA'
-                self.metadata['tz_offset'] = 8
-            else: # Maluku, Papua
-                self.metadata['tz_name'] = 'WIT'
-                self.metadata['tz_offset'] = 9
+            if lon < 114.8:
+                self.metadata['tz_name'], self.metadata['tz_offset'] = 'WIB', 7
+            elif 114.8 <= lon < 129.0:
+                self.metadata['tz_name'], self.metadata['tz_offset'] = 'WITA', 8
+            else:
+                self.metadata['tz_name'], self.metadata['tz_offset'] = 'WIT', 9
             
-            print(f"[GEO-AI] Lokasi Terdeteksi: Lon {lon} E")
-            print(f"[GEO-AI] Auto-Set Timezone: {self.metadata['tz_name']} (UTC+{self.metadata['tz_offset']})")
+            print(f"[GEO-AI] Lokasi: {self.metadata['lat']}, {lon} | Zona: {self.metadata['tz_name']}")
         else:
-            print("[WARN] Koordinat tidak ditemukan di header. Default ke WIB (UTC+7).")
-            self.metadata['tz_name'] = 'WIB'
-            self.metadata['tz_offset'] = 7
+            print("[WARN] Koordinat tidak ditemukan. Default ke WIB (UTC+7).")
+            self.metadata['tz_name'], self.metadata['tz_offset'] = 'WIB', 7
+            self.metadata['lat'] = -8.0 # Default lat jika null (perlu untuk utide)
 
     def process_data(self):
-        """
-        Pipeline: Parsing -> Auto-Timezone -> Cleaning
-        """
+        """Pipeline: Parsing -> Auto-Timezone -> Cleaning"""
         lines = self.raw_content.strip().split('\n')
-        
-        # 1. Deteksi Zona Waktu Dulu
         self._detect_timezone_by_coords(lines)
         
-        # 2. Cari Header Data
         header_idx = 0
         for i, line in enumerate(lines):
             if 'Lat' in line and 'Lon' in line and 'z(m)' in line:
                 header_idx = i
                 break
         
-        # 3. Parsing Robust
         try:
             data_io = io.StringIO(self.raw_content)
             temp_df = pd.read_csv(
-                data_io,
-                sep=r'\s+',
-                skiprows=header_idx + 1,
-                header=None,
-                names=['Lat', 'Lon', 'Date', 'Time', 'elevation_m'],
-                engine='python'
+                data_io, sep=r'\s+', skiprows=header_idx + 1, header=None,
+                names=['Lat', 'Lon', 'Date', 'Time', 'elevation_m'], engine='python'
             )
             
-            # 4. Gabung Waktu (UTC)
-            temp_df['datetime_utc'] = pd.to_datetime(
-                temp_df['Date'] + ' ' + temp_df['Time'], 
-                format='%Y-%m-%d %H:%M:%S'
-            )
+            temp_df['datetime_utc'] = pd.to_datetime(temp_df['Date'] + ' ' + temp_df['Time'])
             
-            # 5. KONVERSI DINAMIS SESUAI LOKASI
-            offset_jam = self.metadata['tz_offset']
-            temp_df['datetime_local'] = temp_df['datetime_utc'] + pd.Timedelta(hours=offset_jam)
+            # Simpan waktu lokal untuk visualisasi
+            offset = self.metadata['tz_offset']
+            temp_df['datetime_local'] = temp_df['datetime_utc'] + pd.Timedelta(hours=offset)
             
-            self.df = temp_df[['datetime_local', 'elevation_m']].copy()
+            # UTide membutuhkan format waktu matplotlib date number atau datetime object
+            self.df = temp_df[['datetime_utc', 'datetime_local', 'elevation_m']].copy()
+            
+            # Hapus data kosong agar analisis harmonik tidak error
+            self.df.dropna(subset=['elevation_m'], inplace=True)
+            
+            print(f"[SYSTEM] Data berhasil dimuat: {len(self.df)} baris data.")
             return self.df
             
         except Exception as e:
@@ -120,35 +105,80 @@ class HydroTideArchitect:
 
     def analyze_tide_type(self):
         """
-        Menentukan tipe pasut (Diurnal/Semidiurnal/Mixed) menggunakan FFT.
+        Analisis Harmonik menggunakan UTide (Least Squares).
+        Mengekstrak Amplitudo M2, S2, K1, O1 untuk menghitung Formzahl Wyrtki.
         """
         if self.df is None: return
         
-        y = self.df['elevation_m'].values
-        fs = 1.0 
-        freqs, psd = periodogram(y, fs)
+        print("\n" + "="*40)
+        print("   ANALISIS HARMONIK (UTIDE)   ")
+        print("="*40)
+
+        # Persiapan Data untuk UTide
+        time_vals = self.df['datetime_utc'] # Gunakan UTC untuk analisis
+        elev_vals = self.df['elevation_m'].values
+        lat_val = self.metadata['lat'] if self.metadata['lat'] else -8.0
+
+        # Jalankan Solver UTide
+        try:
+            coef = utide.solve(
+                time_vals, elev_vals,
+                lat=lat_val,
+                nodal=True,       # Koreksi nodal (penting untuk akurasi)
+                trend=True,       # Deteksi kenaikan muka air (SLR)
+                method='ols',     # Ordinary Least Squares
+                conf_int='linear',
+                verbose=False     # Supress output bawaan utide
+            )
+        except Exception as e:
+            print(f"[ERROR] UTide gagal: {e}")
+            return
+
+        # Ekstrak Amplitudo Konstituen Utama
+        names = coef['name'].tolist()
+        amplitudes = coef['A'].tolist()
         
-        # Filter energi di frekuensi diurnal (24h) dan semidiurnal (12h)
-        power_semi = psd[np.where((freqs > 0.07) & (freqs < 0.09))].max()
-        power_diur = psd[np.where((freqs > 0.035) & (freqs < 0.05))].max()
+        target_constituents = ['M2', 'S2', 'K1', 'O1']
+        found_amps = {k: 0.0 for k in target_constituents}
+
+        print("[RESULT] Amplitudo Konstituen Utama:")
+        for name, amp in zip(names, amplitudes):
+            if name in target_constituents:
+                found_amps[name] = amp
+                self.constituents[name] = amp
+                print(f"   - {name}: {amp:.4f} m")
+
+        # Hitung Formzahl (Wyrtki, 1961)
+        numerator = found_amps['K1'] + found_amps['O1']
+        denominator = found_amps['M2'] + found_amps['S2']
         
-        # Hitung rasio
-        ratio = power_diur / power_semi if power_semi > 0 else 999
+        if denominator == 0:
+            print("[WARN] Amplitudo Semidiurnal 0, tidak bisa membagi.")
+            self.formzahl = 999.0
+        else:
+            self.formzahl = numerator / denominator
+
+        F = self.formzahl
         
-        # Klasifikasi (Formzahl sederhana)
-        if ratio < 0.25: 
-            self.tide_type = "Semidiurnal (Ganda Murni)"
-        elif ratio > 3.0: 
-            self.tide_type = "Diurnal (Tunggal Murni)"
-        else: 
-            self.tide_type = "Mixed Tide (Campuran)"
+        # Klasifikasi Wyrtki (1961)
+        if 0 < F <= 0.25:
+            self.tide_type = "Semidiurnal (Ganda)"
+        elif 0.25 < F <= 1.5:
+            self.tide_type = "Mixed, prevailing semidiurnal (Campuran condong Ganda)"
+        elif 1.5 < F <= 3.0:
+            self.tide_type = "Mixed, prevailing diurnal (Campuran condong Tunggal)"
+        elif F > 3.0:
+            self.tide_type = "Diurnal (Tunggal)"
+        else:
+            self.tide_type = "Undefined"
             
-        print(f"[ANALYSIS] Tipe Pasut: {self.tide_type} (Ratio Energi: {ratio:.2f})")
+        print("-" * 40)
+        print(f"Formzahl (F) : {F:.4f}")
+        print(f"Klasifikasi  : {self.tide_type}")
+        print("="*40 + "\n")
 
     def recommend_fieldwork_window(self):
-        """
-        Mencari 3 hari terbaik (Spring Tide) untuk Fieldwork.
-        """
+        """Mencari 3 hari terbaik (Spring Tide) untuk Fieldwork."""
         if self.df is None: return
 
         daily = self.df.set_index('datetime_local').resample('D')['elevation_m'].agg(['min', 'max'])
@@ -161,69 +191,48 @@ class HydroTideArchitect:
         start_date = best_end_date - pd.Timedelta(days=2)
         
         tz = self.metadata['tz_name']
-        print("\n" + "="*50)
-        print(f"   REKOMENDASI JADWAL FIELDWORK ({tz})   ")
-        print("="*50)
-        print(f"Jendela Waktu Terbaik : {start_date.strftime('%d %b')} - {best_end_date.strftime('%d %b %Y')}")
-        print(f"Fase                  : Spring Tide (Pasang Purnama)")
-        print(f"Total Tidal Range     : {daily.loc[best_end_date, '3d_range_sum']:.2f} m (Kumulatif 3 hari)")
-        print(f"Tipe Pasut            : {self.tide_type}") # Tampilkan juga di sini
-        print("-" * 50)
-        print("Notes:")
-        print(f"- Jam operasional mengacu pada waktu {tz}.")
-        print("="*50 + "\n")
+        print(f"REKOMENDASI FIELDWORK ({tz}): {start_date.strftime('%d %b')} - {best_end_date.strftime('%d %b %Y')}")
+        print(f"Total Range (3 Hari): {daily.loc[best_end_date, '3d_range_sum']:.2f} m")
 
     def export_excel_pro(self, filename=None):
-        """
-        Export Excel dengan grafik Transversal dan Label Timezone yang benar.
-        """
         if self.df is None: return
-        
-        if filename is None:
-            filename = f"Laporan_Pasut_{self.metadata['tz_name']}.xlsx"
+        if filename is None: filename = f"Laporan_Pasut_{self.metadata['tz_name']}.xlsx"
 
         writer = pd.ExcelWriter(filename, engine='xlsxwriter')
-        self.df.to_excel(writer, sheet_name='Data', index=False)
+        # Simpan data utama
+        self.df[['datetime_local', 'elevation_m']].to_excel(writer, sheet_name='Data', index=False)
         
+        # Simpan Konstanta Harmonik di sheet terpisah
+        if self.constituents:
+            df_const = pd.DataFrame(list(self.constituents.items()), columns=['Konstituen', 'Amplitudo (m)'])
+            df_const.loc[len(df_const)] = ['Formzahl', self.formzahl]
+            df_const.loc[len(df_const)] = ['Tipe', self.tide_type]
+            df_const.to_excel(writer, sheet_name='Harmonik', index=False)
+
+        # Buat Grafik
         workbook = writer.book
         worksheet = writer.sheets['Data']
-        date_format = workbook.add_format({'num_format': 'dd mmm hh:mm', 'align': 'left'})
-        worksheet.set_column('A:A', 20, date_format)
-        
         chart = workbook.add_chart({'type': 'scatter', 'subtype': 'smooth'})
         max_row = len(self.df) + 1
         
         chart.add_series({
-            'name':       'Elevasi (m)',
+            'name': 'Elevasi (m)',
             'categories': ['Data', 1, 0, max_row, 0],
-            'values':     ['Data', 1, 1, max_row, 1],
-            'line':       {'color': '#0070C0', 'width': 1.5},
+            'values': ['Data', 1, 1, max_row, 1],
+            'line': {'color': '#0070C0', 'width': 1.5},
         })
         
         tz = self.metadata['tz_name']
-        # Tipe Pasut dikembalikan ke Judul Grafik
-        chart.set_title({'name': f'Hidrograf ({tz}) - {self.tide_type}'})
-        chart.set_x_axis({
-            'name': f'Waktu ({tz})', 
-            'date_axis': True,
-            'num_format': 'dd/mm',
-            'major_gridlines': {'visible': True}
-        })
-        chart.set_y_axis({'name': 'Elevasi (m)', 'major_gridlines': {'visible': True}})
-        chart.set_size({'width': 1000, 'height': 400}) # Wide Aspect Ratio
-        
+        chart.set_title({'name': f'Hidrograf ({tz}) - F={self.formzahl:.2f} ({self.tide_type})'})
+        chart.set_x_axis({'name': f'Waktu ({tz})', 'date_axis': True, 'num_format': 'dd/mm'})
+        chart.set_size({'width': 1000, 'height': 400})
         worksheet.insert_chart('D2', chart)
         writer.close()
         print(f"[SUCCESS] Excel generated: {filename}")
 
     def export_html_pro(self, filename=None):
-        """
-        Export HTML Plotly dengan Filled Area (Transversal) dan Smart Axis Tick.
-        """
         if self.df is None: return
-        
-        if filename is None:
-            filename = f"Visualisasi_Pasut_{self.metadata['tz_name']}.html"
+        if filename is None: filename = f"Visualisasi_Pasut_{self.metadata['tz_name']}.html"
             
         tz = self.metadata['tz_name']
         
@@ -232,30 +241,30 @@ class HydroTideArchitect:
             x=self.df['datetime_local'],
             y=self.df['elevation_m'],
             mode='lines',
-            fill='tozeroy',  # Transversal Style
+            fill='tozeroy', 
             name='Elevasi Air',
             line=dict(color='#0077be', width=2), 
             fillcolor='rgba(0, 119, 190, 0.4)'
         ))
         
+        # Tambahkan Garis MSL (Mean Sea Level)
         msl = self.df['elevation_m'].mean()
         fig.add_hline(y=msl, line_dash="dash", line_color="red", 
                      annotation_text=f"MSL ({msl:.2f}m)", annotation_position="top right")
 
-        lat_str = str(self.metadata.get('lat', '-'))
-        lon_str = str(self.metadata.get('lon', '-'))
-        
+        # Format nilai F untuk ditampilkan di HTML
+        f_display = f"&#8776; {self.formzahl:.3f}" 
+
         fig.update_layout(
             title=dict(
-                text=f"<b>Analisis Pasang Surut</b><br><sub>Lokasi: {lat_str}, {lon_str} | Zona: {tz} | Tipe: {self.tide_type}</sub>",
-                font=dict(size=20)
+                text=f"<b>Analisis Pasang Surut Harmonik</b><br><sub>Lokasi: {self.metadata['lat']}, {self.metadata['lon']} | Zona: {tz} | <b>Tipe: {self.tide_type} (F {f_display})</b></sub>",
+                font=dict(size=18)
             ),
             xaxis=dict(
                 title=f"Waktu ({tz})",
-                # Logika Anti-Tumpang Tindih (Smart Ticks)
-                # tickformatstops digunakan untuk mengubah format teks berdasarkan zoom level.
                 gridcolor='rgba(0,0,0,0.1)',
                 rangeslider=dict(visible=True),
+                # === RESTORED FEATURE: Smart Ticks untuk Hari ===
                 tickformatstops=[
                     dict(dtickrange=[None, 86400000], value="%A\n%d %b %H:%M"), # Zoom In (< 1 hari): Detail
                     dict(dtickrange=[86400000, 604800000], value="%d %b\n%A"),   # 1 Hari - 1 Minggu: Tgl + Hari
@@ -277,34 +286,26 @@ class HydroTideArchitect:
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # GANTI NAMA FILE ANDA DI SINI
     target_file = 'wg2pasut1-28jan.txt' 
     
-    # Gunakan dummy string jika file tidak ada (hanya untuk demo sistem)
-    dummy_input = """Prediksi Pasang Surut BIG 
-Lat: -8.437600  Lon: 112.667364 
- 
-     Lat       Lon        yyyy-mm-dd hh:mm:ss (UTC)     z(m)
-    -8.4376  112.6674     2026-01-01 00:00:00     0.135
-"""
+    # Dummy data untuk testing (2 komponen sinus)
+    t = pd.date_range(start='2025-01-01', periods=24*30, freq='H')
+    y = 1.0 * np.sin(2 * np.pi * (t.hour / 12.42)) + 0.5 * np.sin(2 * np.pi * (t.hour / 23.93))
+    dummy_csv = "Lat: -8.5 Lon: 112.5 z(m)\nLat Lon Date Time elevation_m\n"
+    for time, val in zip(t, y):
+        dummy_csv += f"-8.5 112.5 {time.strftime('%Y-%m-%d %H:%M:%S')} {val:.3f}\n"
 
     if os.path.exists(target_file):
         print(f"[SYSTEM] Membaca file: {target_file}")
         architect = HydroTideArchitect(file_path=target_file)
     else:
-        print("[SYSTEM] File tidak ditemukan, menggunakan dummy data internal.")
-        architect = HydroTideArchitect(raw_data_string=dummy_input)
+        print("[SYSTEM] Menggunakan Data Dummy Simulasi.")
+        architect = HydroTideArchitect(raw_data_string=dummy_csv)
 
-    # 1. Proses Data
     df = architect.process_data()
     
     if df is not None:
-        # 2. Analisis
-        architect.analyze_tide_type()
-        
-        # 3. Fieldwork Plan
+        architect.analyze_tide_type() 
         architect.recommend_fieldwork_window()
-        
-        # 4. Export
         architect.export_excel_pro()
         architect.export_html_pro()
